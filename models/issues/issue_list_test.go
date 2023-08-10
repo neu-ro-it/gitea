@@ -1,12 +1,12 @@
 // Copyright 2017 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package issues_test
 
 import (
 	"testing"
 
+	"code.gitea.io/gitea/models/db"
 	issues_model "code.gitea.io/gitea/models/issues"
 	"code.gitea.io/gitea/models/unittest"
 	"code.gitea.io/gitea/modules/setting"
@@ -23,7 +23,7 @@ func TestIssueList_LoadRepositories(t *testing.T) {
 		unittest.AssertExistsAndLoadBean(t, &issues_model.Issue{ID: 4}),
 	}
 
-	repos, err := issueList.LoadRepositories()
+	repos, err := issueList.LoadRepositories(db.DefaultContext)
 	assert.NoError(t, err)
 	assert.Len(t, repos, 2)
 	for _, issue := range issueList {
@@ -39,7 +39,7 @@ func TestIssueList_LoadAttributes(t *testing.T) {
 		unittest.AssertExistsAndLoadBean(t, &issues_model.Issue{ID: 4}),
 	}
 
-	assert.NoError(t, issueList.LoadAttributes())
+	assert.NoError(t, issueList.LoadAttributes(db.DefaultContext))
 	for _, issue := range issueList {
 		assert.EqualValues(t, issue.RepoID, issue.Repo.ID)
 		for _, label := range issue.Labels {
@@ -66,8 +66,10 @@ func TestIssueList_LoadAttributes(t *testing.T) {
 		}
 		if issue.ID == int64(1) {
 			assert.Equal(t, int64(400), issue.TotalTrackedTime)
-		} else if issue.ID == int64(2) {
-			assert.Equal(t, int64(3682), issue.TotalTrackedTime)
+			assert.NotNil(t, issue.Project)
+			assert.Equal(t, int64(1), issue.Project.ID)
+		} else {
+			assert.Nil(t, issue.Project)
 		}
 	}
 }

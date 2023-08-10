@@ -1,6 +1,5 @@
 // Copyright 2022 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package mirror
 
@@ -11,7 +10,7 @@ import (
 	"code.gitea.io/gitea/modules/setting"
 )
 
-var mirrorQueue queue.UniqueQueue
+var mirrorQueue *queue.WorkerPoolQueue[*SyncRequest]
 
 // SyncType type of sync request
 type SyncType int
@@ -30,13 +29,15 @@ type SyncRequest struct {
 }
 
 // StartSyncMirrors starts a go routine to sync the mirrors
-func StartSyncMirrors(queueHandle func(data ...queue.Data) []queue.Data) {
+func StartSyncMirrors(queueHandle func(data ...*SyncRequest) []*SyncRequest) {
 	if !setting.Mirror.Enabled {
 		return
 	}
-	mirrorQueue = queue.CreateUniqueQueue("mirror", queueHandle, new(SyncRequest))
-
-	go graceful.GetManager().RunWithShutdownFns(mirrorQueue.Run)
+	mirrorQueue = queue.CreateUniqueQueue(graceful.GetManager().ShutdownContext(), "mirror", queueHandle)
+	if mirrorQueue == nil {
+		log.Fatal("Unable to create mirror queue")
+	}
+	go graceful.GetManager().RunWithCancel(mirrorQueue)
 }
 
 // AddPullMirrorToQueue adds repoID to mirror queue

@@ -1,7 +1,6 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
 // Copyright 2020 The Gitea Authors.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package org
 
@@ -63,6 +62,7 @@ func Members(ctx *context.Context) {
 	}
 	ctx.Data["Page"] = pager
 	ctx.Data["Members"] = members
+	ctx.Data["ContextUser"] = ctx.ContextUser
 	ctx.Data["MembersIsPublicMember"] = membersIsPublic
 	ctx.Data["MembersIsUserOrgOwner"] = organization.IsUserOrgOwner(members, org.ID)
 	ctx.Data["MembersTwoFaStatus"] = members.GetTwoFaStatus()
@@ -101,25 +101,28 @@ func MembersAction(ctx *context.Context) {
 		err = models.RemoveOrgUser(org.ID, uid)
 		if organization.IsErrLastOrgOwner(err) {
 			ctx.Flash.Error(ctx.Tr("form.last_org_owner"))
-			ctx.JSON(http.StatusOK, map[string]interface{}{
-				"redirect": ctx.Org.OrgLink + "/members",
-			})
+			ctx.JSONRedirect(ctx.Org.OrgLink + "/members")
 			return
 		}
 	case "leave":
 		err = models.RemoveOrgUser(org.ID, ctx.Doer.ID)
-		if organization.IsErrLastOrgOwner(err) {
-			ctx.Flash.Error(ctx.Tr("form.last_org_owner"))
-			ctx.JSON(http.StatusOK, map[string]interface{}{
-				"redirect": ctx.Org.OrgLink + "/members",
+		if err == nil {
+			ctx.Flash.Success(ctx.Tr("form.organization_leave_success", org.DisplayName()))
+			ctx.JSON(http.StatusOK, map[string]any{
+				"redirect": "", // keep the user stay on current page, in case they want to do other operations.
 			})
-			return
+		} else if organization.IsErrLastOrgOwner(err) {
+			ctx.Flash.Error(ctx.Tr("form.last_org_owner"))
+			ctx.JSONRedirect(ctx.Org.OrgLink + "/members")
+		} else {
+			log.Error("RemoveOrgUser(%d,%d): %v", org.ID, ctx.Doer.ID, err)
 		}
+		return
 	}
 
 	if err != nil {
 		log.Error("Action(%s): %v", ctx.Params(":action"), err)
-		ctx.JSON(http.StatusOK, map[string]interface{}{
+		ctx.JSON(http.StatusOK, map[string]any{
 			"ok":  false,
 			"err": err.Error(),
 		})
@@ -131,7 +134,5 @@ func MembersAction(ctx *context.Context) {
 		redirect = setting.AppSubURL + "/"
 	}
 
-	ctx.JSON(http.StatusOK, map[string]interface{}{
-		"redirect": redirect,
-	})
+	ctx.JSONRedirect(redirect)
 }

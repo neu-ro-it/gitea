@@ -1,6 +1,5 @@
 // Copyright 2021 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package integration
 
@@ -11,12 +10,14 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
+	"strconv"
 	"testing"
 	"time"
 
+	auth_model "code.gitea.io/gitea/models/auth"
 	"code.gitea.io/gitea/models/db"
 	"code.gitea.io/gitea/models/packages"
 	"code.gitea.io/gitea/models/unittest"
@@ -35,7 +36,7 @@ func addNuGetAPIKeyHeader(request *http.Request, token string) *http.Request {
 	return request
 }
 
-func decodeXML(t testing.TB, resp *httptest.ResponseRecorder, v interface{}) {
+func decodeXML(t testing.TB, resp *httptest.ResponseRecorder, v any) {
 	t.Helper()
 
 	assert.NoError(t, xml.NewDecoder(resp.Body).Decode(v))
@@ -68,14 +69,20 @@ func TestPackageNuGet(t *testing.T) {
 		Content    string               `xml:",innerxml"`
 	}
 
+	type FeedEntryLink struct {
+		Rel  string `xml:"rel,attr"`
+		Href string `xml:"href,attr"`
+	}
+
 	type FeedResponse struct {
-		XMLName xml.Name     `xml:"feed"`
-		Entries []*FeedEntry `xml:"entry"`
-		Count   int64        `xml:"count"`
+		XMLName xml.Name        `xml:"feed"`
+		Links   []FeedEntryLink `xml:"link"`
+		Entries []*FeedEntry    `xml:"entry"`
+		Count   int64           `xml:"count"`
 	}
 
 	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
-	token := getUserToken(t, user.Name)
+	token := getUserToken(t, user.Name, auth_model.AccessTokenScopeWritePackage)
 
 	packageName := "test.package"
 	packageVersion := "1.0.3"
@@ -106,13 +113,11 @@ func TestPackageNuGet(t *testing.T) {
 		return &buf
 	}
 
-	content, _ := ioutil.ReadAll(createPackage(packageName, packageVersion))
+	content, _ := io.ReadAll(createPackage(packageName, packageVersion))
 
 	url := fmt.Sprintf("/api/packages/%s/nuget", user.Name)
 
 	t.Run("ServiceIndex", func(t *testing.T) {
-		defer tests.PrintCurrentTest(t)()
-
 		t.Run("v2", func(t *testing.T) {
 			defer tests.PrintCurrentTest(t)()
 
@@ -375,9 +380,26 @@ AAAjQmxvYgAAAGm7ENm9SGxMtAFVvPUsPJTF6PbtAAAAAFcVogEJAAAAAQAAAA==`)
 		})
 	})
 
-	t.Run("SearchService", func(t *testing.T) {
-		defer tests.PrintCurrentTest(t)()
+	containsOneNextLink := func(t *testing.T, links []FeedEntryLink) func() bool {
+		return func() bool {
+			found := 0
+			for _, l := range links {
+				if l.Rel == "next" {
+					found++
+					u, err := neturl.Parse(l.Href)
+					assert.NoError(t, err)
+					q := u.Query()
+					assert.Contains(t, q, "$skip")
+					assert.Contains(t, q, "$top")
+					assert.Equal(t, "1", q.Get("$skip"))
+					assert.Equal(t, "1", q.Get("$top"))
+				}
+			}
+			return found == 1
+		}
+	}
 
+	t.Run("SearchService", func(t *testing.T) {
 		cases := []struct {
 			Query           string
 			Skip            int
@@ -393,13 +415,11 @@ AAAjQmxvYgAAAGm7ENm9SGxMtAFVvPUsPJTF6PbtAAAAAFcVogEJAAAAAQAAAA==`)
 		}
 
 		t.Run("v2", func(t *testing.T) {
-			defer tests.PrintCurrentTest(t)()
-
 			t.Run("Search()", func(t *testing.T) {
 				defer tests.PrintCurrentTest(t)()
 
 				for i, c := range cases {
-					req := NewRequest(t, "GET", fmt.Sprintf("%s/Search()?searchTerm='%s'&skip=%d&take=%d", url, c.Query, c.Skip, c.Take))
+					req := NewRequest(t, "GET", fmt.Sprintf("%s/Search()?searchTerm='%s'&$skip=%d&$top=%d", url, c.Query, c.Skip, c.Take))
 					req = AddBasicAuthHeader(req, user.Name)
 					resp := MakeRequest(t, req, http.StatusOK)
 
@@ -408,6 +428,12 @@ AAAjQmxvYgAAAGm7ENm9SGxMtAFVvPUsPJTF6PbtAAAAAFcVogEJAAAAAQAAAA==`)
 
 					assert.Equal(t, c.ExpectedTotal, result.Count, "case %d: unexpected total hits", i)
 					assert.Len(t, result.Entries, c.ExpectedResults, "case %d: unexpected result count", i)
+
+					req = NewRequest(t, "GET", fmt.Sprintf("%s/Search()/$count?searchTerm='%s'&$skip=%d&$top=%d", url, c.Query, c.Skip, c.Take))
+					req = AddBasicAuthHeader(req, user.Name)
+					resp = MakeRequest(t, req, http.StatusOK)
+
+					assert.Equal(t, strconv.FormatInt(c.ExpectedTotal, 10), resp.Body.String(), "case %d: unexpected total hits", i)
 				}
 			})
 
@@ -415,7 +441,7 @@ AAAjQmxvYgAAAGm7ENm9SGxMtAFVvPUsPJTF6PbtAAAAAFcVogEJAAAAAQAAAA==`)
 				defer tests.PrintCurrentTest(t)()
 
 				for i, c := range cases {
-					req := NewRequest(t, "GET", fmt.Sprintf("%s/Search()?$filter=substringof('%s',tolower(Id))&$skip=%d&$top=%d", url, c.Query, c.Skip, c.Take))
+					req := NewRequest(t, "GET", fmt.Sprintf("%s/Packages()?$filter=substringof('%s',tolower(Id))&$skip=%d&$top=%d", url, c.Query, c.Skip, c.Take))
 					req = AddBasicAuthHeader(req, user.Name)
 					resp := MakeRequest(t, req, http.StatusOK)
 
@@ -424,7 +450,24 @@ AAAjQmxvYgAAAGm7ENm9SGxMtAFVvPUsPJTF6PbtAAAAAFcVogEJAAAAAQAAAA==`)
 
 					assert.Equal(t, c.ExpectedTotal, result.Count, "case %d: unexpected total hits", i)
 					assert.Len(t, result.Entries, c.ExpectedResults, "case %d: unexpected result count", i)
+
+					req = NewRequest(t, "GET", fmt.Sprintf("%s/Packages()/$count?$filter=substringof('%s',tolower(Id))&$skip=%d&$top=%d", url, c.Query, c.Skip, c.Take))
+					req = AddBasicAuthHeader(req, user.Name)
+					resp = MakeRequest(t, req, http.StatusOK)
+
+					assert.Equal(t, strconv.FormatInt(c.ExpectedTotal, 10), resp.Body.String(), "case %d: unexpected total hits", i)
 				}
+			})
+
+			t.Run("Next", func(t *testing.T) {
+				req := NewRequest(t, "GET", fmt.Sprintf("%s/Search()?searchTerm='test'&$skip=0&$top=1", url))
+				req = AddBasicAuthHeader(req, user.Name)
+				resp := MakeRequest(t, req, http.StatusOK)
+
+				var result FeedResponse
+				decodeXML(t, resp, &result)
+
+				assert.Condition(t, containsOneNextLink(t, result.Links))
 			})
 		})
 
@@ -514,8 +557,6 @@ AAAjQmxvYgAAAGm7ENm9SGxMtAFVvPUsPJTF6PbtAAAAAFcVogEJAAAAAQAAAA==`)
 		})
 
 		t.Run("RegistrationLeaf", func(t *testing.T) {
-			defer tests.PrintCurrentTest(t)()
-
 			t.Run("v2", func(t *testing.T) {
 				defer tests.PrintCurrentTest(t)()
 
@@ -551,12 +592,10 @@ AAAjQmxvYgAAAGm7ENm9SGxMtAFVvPUsPJTF6PbtAAAAAFcVogEJAAAAAQAAAA==`)
 	})
 
 	t.Run("PackageService", func(t *testing.T) {
-		defer tests.PrintCurrentTest(t)()
-
 		t.Run("v2", func(t *testing.T) {
 			defer tests.PrintCurrentTest(t)()
 
-			req := NewRequest(t, "GET", fmt.Sprintf("%s/FindPackagesById()?id='%s'", url, packageName))
+			req := NewRequest(t, "GET", fmt.Sprintf("%s/FindPackagesById()?id='%s'&$top=1", url, packageName))
 			req = AddBasicAuthHeader(req, user.Name)
 			resp := MakeRequest(t, req, http.StatusOK)
 
@@ -565,6 +604,13 @@ AAAjQmxvYgAAAGm7ENm9SGxMtAFVvPUsPJTF6PbtAAAAAFcVogEJAAAAAQAAAA==`)
 
 			assert.Len(t, result.Entries, 1)
 			assert.Equal(t, packageVersion, result.Entries[0].Properties.Version)
+			assert.Condition(t, containsOneNextLink(t, result.Links))
+
+			req = NewRequest(t, "GET", fmt.Sprintf("%s/FindPackagesById()/$count?id='%s'", url, packageName))
+			req = AddBasicAuthHeader(req, user.Name)
+			resp = MakeRequest(t, req, http.StatusOK)
+
+			assert.Equal(t, "1", resp.Body.String())
 		})
 
 		t.Run("v3", func(t *testing.T) {

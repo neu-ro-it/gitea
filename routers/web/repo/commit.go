@@ -1,7 +1,6 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package repo
 
@@ -24,6 +23,7 @@ import (
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/services/gitdiff"
+	git_service "code.gitea.io/gitea/services/repository"
 )
 
 const (
@@ -71,12 +71,12 @@ func Commits(ctx *context.Context) {
 	}
 
 	// Both `git log branchName` and `git log commitId` work.
-	commits, err := ctx.Repo.Commit.CommitsByRange(page, pageSize)
+	commits, err := ctx.Repo.Commit.CommitsByRange(page, pageSize, "")
 	if err != nil {
 		ctx.ServerError("CommitsByRange", err)
 		return
 	}
-	ctx.Data["Commits"] = git_model.ConvertFromGitCommit(commits, ctx.Repo.Repository)
+	ctx.Data["Commits"] = git_model.ConvertFromGitCommit(ctx, commits, ctx.Repo.Repository)
 
 	ctx.Data["Username"] = ctx.Repo.Owner.Name
 	ctx.Data["Reponame"] = ctx.Repo.Repository.Name
@@ -139,7 +139,7 @@ func Graph(ctx *context.Context) {
 		return
 	}
 
-	if err := graph.LoadAndProcessCommits(ctx.Repo.Repository, ctx.Repo.GitRepo); err != nil {
+	if err := graph.LoadAndProcessCommits(ctx, ctx.Repo.Repository, ctx.Repo.GitRepo); err != nil {
 		ctx.ServerError("LoadAndProcessCommits", err)
 		return
 	}
@@ -195,7 +195,7 @@ func SearchCommits(ctx *context.Context) {
 		return
 	}
 	ctx.Data["CommitCount"] = len(commits)
-	ctx.Data["Commits"] = git_model.ConvertFromGitCommit(commits, ctx.Repo.Repository)
+	ctx.Data["Commits"] = git_model.ConvertFromGitCommit(ctx, commits, ctx.Repo.Repository)
 
 	ctx.Data["Keyword"] = query
 	if all {
@@ -231,12 +231,17 @@ func FileHistory(ctx *context.Context) {
 		page = 1
 	}
 
-	commits, err := ctx.Repo.GitRepo.CommitsByFileAndRange(ctx.Repo.RefName, fileName, page)
+	commits, err := ctx.Repo.GitRepo.CommitsByFileAndRange(
+		git.CommitsByFileAndRangeOptions{
+			Revision: ctx.Repo.RefName,
+			File:     fileName,
+			Page:     page,
+		})
 	if err != nil {
 		ctx.ServerError("CommitsByFileAndRange", err)
 		return
 	}
-	ctx.Data["Commits"] = git_model.ConvertFromGitCommit(commits, ctx.Repo.Repository)
+	ctx.Data["Commits"] = git_model.ConvertFromGitCommit(ctx, commits, ctx.Repo.Repository)
 
 	ctx.Data["Username"] = ctx.Repo.Owner.Name
 	ctx.Data["Reponame"] = ctx.Repo.Repository.Name
@@ -251,10 +256,18 @@ func FileHistory(ctx *context.Context) {
 	ctx.HTML(http.StatusOK, tplCommits)
 }
 
+func LoadBranchesAndTags(ctx *context.Context) {
+	response, err := git_service.LoadBranchesAndTags(ctx, ctx.Repo, ctx.Params("sha"))
+	if err == nil {
+		ctx.JSON(http.StatusOK, response)
+		return
+	}
+	ctx.NotFoundOrServerError(fmt.Sprintf("could not load branches and tags the commit %s belongs to", ctx.Params("sha")), git.IsErrNotExist, err)
+}
+
 // Diff show different from current commit to previous commit
 func Diff(ctx *context.Context) {
 	ctx.Data["PageIsDiff"] = true
-	ctx.Data["RequireTribute"] = true
 
 	userName := ctx.Repo.Owner.Name
 	repoName := ctx.Repo.Repository.Name
@@ -284,7 +297,7 @@ func Diff(ctx *context.Context) {
 		}
 		return
 	}
-	if len(commitID) != 40 {
+	if len(commitID) != git.SHAFullLength {
 		commitID = commit.ID.String()
 	}
 
@@ -336,7 +349,7 @@ func Diff(ctx *context.Context) {
 	ctx.Data["Commit"] = commit
 	ctx.Data["Diff"] = diff
 
-	statuses, _, err := git_model.GetLatestCommitStatus(ctx, ctx.Repo.Repository.ID, commitID, db.ListOptions{})
+	statuses, _, err := git_model.GetLatestCommitStatus(ctx, ctx.Repo.Repository.ID, commitID, db.ListOptions{ListAll: true})
 	if err != nil {
 		log.Error("GetLatestCommitStatus: %v", err)
 	}
@@ -344,9 +357,9 @@ func Diff(ctx *context.Context) {
 	ctx.Data["CommitStatus"] = git_model.CalcCommitStatus(statuses)
 	ctx.Data["CommitStatuses"] = statuses
 
-	verification := asymkey_model.ParseCommitWithSignature(commit)
+	verification := asymkey_model.ParseCommitWithSignature(ctx, commit)
 	ctx.Data["Verification"] = verification
-	ctx.Data["Author"] = user_model.ValidateCommitWithEmail(commit)
+	ctx.Data["Author"] = user_model.ValidateCommitWithEmail(ctx, commit)
 	ctx.Data["Parents"] = parents
 	ctx.Data["DiffNotAvailable"] = diff.NumFiles == 0
 
@@ -362,7 +375,7 @@ func Diff(ctx *context.Context) {
 	if err == nil {
 		ctx.Data["Note"] = string(charset.ToUTF8WithFallback(note.Message))
 		ctx.Data["NoteCommit"] = note.Commit
-		ctx.Data["NoteAuthor"] = user_model.ValidateCommitWithEmail(note.Commit)
+		ctx.Data["NoteAuthor"] = user_model.ValidateCommitWithEmail(ctx, note.Commit)
 	}
 
 	ctx.Data["BranchName"], err = commit.GetBranchName()
@@ -371,11 +384,6 @@ func Diff(ctx *context.Context) {
 		return
 	}
 
-	ctx.Data["TagName"], err = commit.GetTagName()
-	if err != nil {
-		ctx.ServerError("commit.GetTagName", err)
-		return
-	}
 	ctx.HTML(http.StatusOK, tplCommitPage)
 }
 

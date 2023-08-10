@@ -1,6 +1,5 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package setting
 
@@ -11,6 +10,7 @@ import (
 	"code.gitea.io/gitea/models/auth"
 	"code.gitea.io/gitea/modules/base"
 	"code.gitea.io/gitea/modules/context"
+	"code.gitea.io/gitea/modules/util"
 	"code.gitea.io/gitea/modules/web"
 	"code.gitea.io/gitea/services/forms"
 )
@@ -32,6 +32,7 @@ func (oa *OAuth2CommonHandlers) renderEditPage(ctx *context.Context) {
 func (oa *OAuth2CommonHandlers) AddApp(ctx *context.Context) {
 	form := web.GetForm(ctx).(*forms.EditOAuth2ApplicationForm)
 	if ctx.HasError() {
+		ctx.Flash.Error(ctx.GetErrMsg())
 		// go to the application list page
 		ctx.Redirect(oa.BasePathList)
 		return
@@ -40,7 +41,7 @@ func (oa *OAuth2CommonHandlers) AddApp(ctx *context.Context) {
 	// TODO validate redirect URI
 	app, err := auth.CreateOAuth2Application(ctx, auth.CreateOAuth2ApplicationOptions{
 		Name:               form.Name,
-		RedirectURIs:       []string{form.RedirectURI},
+		RedirectURIs:       util.SplitTrimSpace(form.RedirectURIs, "\n"),
 		UserID:             oa.OwnerID,
 		ConfidentialClient: form.ConfidentialClient,
 	})
@@ -93,7 +94,7 @@ func (oa *OAuth2CommonHandlers) EditSave(ctx *context.Context) {
 	if ctx.Data["App"], err = auth.UpdateOAuth2Application(auth.UpdateOAuth2ApplicationOptions{
 		ID:                 ctx.ParamsInt64("id"),
 		Name:               form.Name,
-		RedirectURIs:       []string{form.RedirectURI},
+		RedirectURIs:       util.SplitTrimSpace(form.RedirectURIs, "\n"),
 		UserID:             oa.OwnerID,
 		ConfidentialClient: form.ConfidentialClient,
 	}); err != nil {
@@ -137,7 +138,7 @@ func (oa *OAuth2CommonHandlers) DeleteApp(ctx *context.Context) {
 	}
 
 	ctx.Flash.Success(ctx.Tr("settings.remove_oauth2_application_success"))
-	ctx.JSON(http.StatusOK, map[string]interface{}{"redirect": oa.BasePathList})
+	ctx.JSONRedirect(oa.BasePathList)
 }
 
 // RevokeGrant revokes the grant
@@ -148,5 +149,5 @@ func (oa *OAuth2CommonHandlers) RevokeGrant(ctx *context.Context) {
 	}
 
 	ctx.Flash.Success(ctx.Tr("settings.revoke_oauth2_grant_success"))
-	ctx.JSON(http.StatusOK, map[string]interface{}{"redirect": oa.BasePathList})
+	ctx.JSONRedirect(oa.BasePathList)
 }

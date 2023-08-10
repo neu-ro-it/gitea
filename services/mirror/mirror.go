@@ -1,6 +1,5 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package mirror
 
@@ -42,7 +41,7 @@ func Update(ctx context.Context, pullLimit, pushLimit int) error {
 	}
 	log.Trace("Doing: Update")
 
-	handler := func(idx int, bean interface{}) error {
+	handler := func(idx int, bean any) error {
 		var repo *repo_model.Repository
 		var mirrorType mirror_module.SyncType
 		var referenceID int64
@@ -92,7 +91,7 @@ func Update(ctx context.Context, pullLimit, pushLimit int) error {
 
 	pullMirrorsRequested := 0
 	if pullLimit != 0 {
-		if err := repo_model.MirrorsIterate(pullLimit, func(idx int, bean interface{}) error {
+		if err := repo_model.MirrorsIterate(pullLimit, func(idx int, bean any) error {
 			if err := handler(idx, bean); err != nil {
 				return err
 			}
@@ -106,7 +105,7 @@ func Update(ctx context.Context, pullLimit, pushLimit int) error {
 
 	pushMirrorsRequested := 0
 	if pushLimit != 0 {
-		if err := repo_model.PushMirrorsIterate(ctx, pushLimit, func(idx int, bean interface{}) error {
+		if err := repo_model.PushMirrorsIterate(ctx, pushLimit, func(idx int, bean any) error {
 			if err := handler(idx, bean); err != nil {
 				return err
 			}
@@ -121,9 +120,8 @@ func Update(ctx context.Context, pullLimit, pushLimit int) error {
 	return nil
 }
 
-func queueHandle(data ...queue.Data) []queue.Data {
-	for _, datum := range data {
-		req := datum.(*mirror_module.SyncRequest)
+func queueHandler(items ...*mirror_module.SyncRequest) []*mirror_module.SyncRequest {
+	for _, req := range items {
 		doMirrorSync(graceful.GetManager().ShutdownContext(), req)
 	}
 	return nil
@@ -131,5 +129,5 @@ func queueHandle(data ...queue.Data) []queue.Data {
 
 // InitSyncMirrors initializes a go routine to sync the mirrors
 func InitSyncMirrors() {
-	mirror_module.StartSyncMirrors(queueHandle)
+	mirror_module.StartSyncMirrors(queueHandler)
 }

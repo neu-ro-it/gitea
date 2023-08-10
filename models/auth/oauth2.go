@@ -1,12 +1,10 @@
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package auth
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base32"
 	"encoding/base64"
 	"fmt"
@@ -15,10 +13,13 @@ import (
 	"strings"
 
 	"code.gitea.io/gitea/models/db"
+	"code.gitea.io/gitea/modules/container"
+	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/timeutil"
 	"code.gitea.io/gitea/modules/util"
 
 	uuid "github.com/google/uuid"
+	"github.com/minio/sha256-simd"
 	"golang.org/x/crypto/bcrypt"
 	"xorm.io/builder"
 	"xorm.io/xorm"
@@ -47,17 +48,86 @@ func init() {
 	db.RegisterModel(new(OAuth2Grant))
 }
 
+type BuiltinOAuth2Application struct {
+	ConfigName   string
+	DisplayName  string
+	RedirectURIs []string
+}
+
+func BuiltinApplications() map[string]*BuiltinOAuth2Application {
+	m := make(map[string]*BuiltinOAuth2Application)
+	m["a4792ccc-144e-407e-86c9-5e7d8d9c3269"] = &BuiltinOAuth2Application{
+		ConfigName:   "git-credential-oauth",
+		DisplayName:  "git-credential-oauth",
+		RedirectURIs: []string{"http://127.0.0.1", "https://127.0.0.1"},
+	}
+	m["e90ee53c-94e2-48ac-9358-a874fb9e0662"] = &BuiltinOAuth2Application{
+		ConfigName:   "git-credential-manager",
+		DisplayName:  "Git Credential Manager",
+		RedirectURIs: []string{"http://127.0.0.1", "https://127.0.0.1"},
+	}
+	return m
+}
+
+func Init(ctx context.Context) error {
+	builtinApps := BuiltinApplications()
+	var builtinAllClientIDs []string
+	for clientID := range builtinApps {
+		builtinAllClientIDs = append(builtinAllClientIDs, clientID)
+	}
+
+	var registeredApps []*OAuth2Application
+	if err := db.GetEngine(ctx).In("client_id", builtinAllClientIDs).Find(&registeredApps); err != nil {
+		return err
+	}
+
+	clientIDsToAdd := container.Set[string]{}
+	for _, configName := range setting.OAuth2.DefaultApplications {
+		found := false
+		for clientID, builtinApp := range builtinApps {
+			if builtinApp.ConfigName == configName {
+				clientIDsToAdd.Add(clientID) // add all user-configured apps to the "add" list
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("unknown oauth2 application: %q", configName)
+		}
+	}
+	clientIDsToDelete := container.Set[string]{}
+	for _, app := range registeredApps {
+		if !clientIDsToAdd.Contains(app.ClientID) {
+			clientIDsToDelete.Add(app.ClientID) // if a registered app is not in the "add" list, it should be deleted
+		}
+	}
+	for _, app := range registeredApps {
+		clientIDsToAdd.Remove(app.ClientID) // no need to re-add existing (registered) apps, so remove them from the set
+	}
+
+	for _, app := range registeredApps {
+		if clientIDsToDelete.Contains(app.ClientID) {
+			if err := deleteOAuth2Application(ctx, app.ID, 0); err != nil {
+				return err
+			}
+		}
+	}
+	for clientID := range clientIDsToAdd {
+		builtinApp := builtinApps[clientID]
+		if err := db.Insert(ctx, &OAuth2Application{
+			Name:         builtinApp.DisplayName,
+			ClientID:     clientID,
+			RedirectURIs: builtinApp.RedirectURIs,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // TableName sets the table name to `oauth2_application`
 func (app *OAuth2Application) TableName() string {
 	return "oauth2_application"
-}
-
-// PrimaryRedirectURI returns the first redirect uri or an empty string if empty
-func (app *OAuth2Application) PrimaryRedirectURI() string {
-	if len(app.RedirectURIs) == 0 {
-		return ""
-	}
-	return app.RedirectURIs[0]
 }
 
 // ContainsRedirectURI checks if redirectURI is allowed for app
@@ -70,13 +140,13 @@ func (app *OAuth2Application) ContainsRedirectURI(redirectURI string) bool {
 			if ip != nil && ip.IsLoopback() {
 				// strip port
 				uri.Host = uri.Hostname()
-				if util.IsStringInSlice(uri.String(), app.RedirectURIs, true) {
+				if util.SliceContainsString(app.RedirectURIs, uri.String(), true) {
 					return true
 				}
 			}
 		}
 	}
-	return util.IsStringInSlice(redirectURI, app.RedirectURIs, true)
+	return util.SliceContainsString(app.RedirectURIs, redirectURI, true)
 }
 
 // Base32 characters, but lowercased.
@@ -201,7 +271,7 @@ type UpdateOAuth2ApplicationOptions struct {
 
 // UpdateOAuth2Application updates an oauth2 application
 func UpdateOAuth2Application(opts UpdateOAuth2ApplicationOptions) (*OAuth2Application, error) {
-	ctx, committer, err := db.TxContext()
+	ctx, committer, err := db.TxContext(db.DefaultContext)
 	if err != nil {
 		return nil, err
 	}
@@ -213,6 +283,10 @@ func UpdateOAuth2Application(opts UpdateOAuth2ApplicationOptions) (*OAuth2Applic
 	}
 	if app.UID != opts.UserID {
 		return nil, fmt.Errorf("UID mismatch")
+	}
+	builtinApps := BuiltinApplications()
+	if _, builtin := builtinApps[app.ClientID]; builtin {
+		return nil, fmt.Errorf("failed to edit OAuth2 application: application is locked: %s", app.ClientID)
 	}
 
 	app.Name = opts.Name
@@ -265,11 +339,19 @@ func deleteOAuth2Application(ctx context.Context, id, userid int64) error {
 
 // DeleteOAuth2Application deletes the application with the given id and the grants and auth codes related to it. It checks if the userid was the creator of the app.
 func DeleteOAuth2Application(id, userid int64) error {
-	ctx, committer, err := db.TxContext()
+	ctx, committer, err := db.TxContext(db.DefaultContext)
 	if err != nil {
 		return err
 	}
 	defer committer.Close()
+	app, err := GetOAuth2ApplicationByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	builtinApps := BuiltinApplications()
+	if _, builtin := builtinApps[app.ClientID]; builtin {
+		return fmt.Errorf("failed to delete OAuth2 application: application is locked: %s", app.ClientID)
+	}
 	if err := deleteOAuth2Application(ctx, id, userid); err != nil {
 		return err
 	}
@@ -315,9 +397,10 @@ func (code *OAuth2AuthorizationCode) TableName() string {
 }
 
 // GenerateRedirectURI generates a redirect URI for a successful authorization request. State will be used if not empty.
-func (code *OAuth2AuthorizationCode) GenerateRedirectURI(state string) (redirect *url.URL, err error) {
-	if redirect, err = url.Parse(code.RedirectURI); err != nil {
-		return
+func (code *OAuth2AuthorizationCode) GenerateRedirectURI(state string) (*url.URL, error) {
+	redirect, err := url.Parse(code.RedirectURI)
+	if err != nil {
+		return nil, err
 	}
 	q := redirect.Query()
 	if state != "" {
